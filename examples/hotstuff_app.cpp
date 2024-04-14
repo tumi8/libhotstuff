@@ -257,19 +257,19 @@ int main(int argc, char **argv) {
     ClientNetwork<opcode_t>::Config clinet_config;
     repnet_config.max_msg_size(opt_max_rep_msg->get());
     clinet_config.max_msg_size(opt_max_cli_msg->get());
-    if (!opt_tls_privkey->get().empty() && !opt_notls->get())
-    {
-        auto tls_priv_key = new salticidae::PKey(
-                salticidae::PKey::create_privkey_from_der(
-                    hotstuff::from_hex(opt_tls_privkey->get())));
-        auto tls_cert = new salticidae::X509(
-                salticidae::X509::create_from_der(
-                    hotstuff::from_hex(opt_tls_cert->get())));
-        repnet_config
-            .enable_tls(true)
-            .tls_key(tls_priv_key)
-            .tls_cert(tls_cert);
-    }
+//    if (!opt_tls_privkey->get().empty() && !opt_notls->get())
+//    {
+//        auto tls_priv_key = new salticidae::PKey(
+//                salticidae::PKey::create_privkey_from_der(
+//                    hotstuff::from_hex(opt_tls_privkey->get())));
+//        auto tls_cert = new salticidae::X509(
+//                salticidae::X509::create_from_der(
+//                    hotstuff::from_hex(opt_tls_cert->get())));
+//        repnet_config
+//            .enable_tls(true)
+//            .tls_key(tls_priv_key)
+//            .tls_cert(tls_cert);
+//    }
     repnet_config
         .burst_size(opt_repburst->get())
         .nworker(opt_repnworker->get());
