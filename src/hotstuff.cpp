@@ -1,6 +1,7 @@
 /**
  * Copyright 2018 VMware
  * Copyright 2018 Ted Yin
+ * Copyright 2023 Chair of Network Architectures and Services, Technical University of Munich
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -360,6 +361,7 @@ HotStuffBase::HotStuffBase(uint32_t blk_size,
     pn.reg_handler(salticidae::generic_bind(&HotStuffBase::resp_blk_handler, this, _1, _2));
     pn.reg_conn_handler(salticidae::generic_bind(&HotStuffBase::conn_handler, this, _1, _2));
     pn.start();
+    SALTICIDAE_LOG_INFO("peer network listening address is %s", std::string(listen_addr).c_str());
     pn.listen(listen_addr);
 }
 

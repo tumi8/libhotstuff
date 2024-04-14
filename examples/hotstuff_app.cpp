@@ -1,6 +1,7 @@
 /**
  * Copyright 2018 VMware
  * Copyright 2018 Ted Yin
+ * Copyright 2023 Chair of Network Architectures and Services, Technical University of Munich
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -206,6 +207,18 @@ int main(int argc, char **argv) {
         exit(0);
     }
     auto idx = opt_idx->get();
+
+    HOTSTUFF_LOG_INFO("argc = %d",argc);
+    //print argv
+    for(int i = 1; i < argc; i++)
+        HOTSTUFF_LOG_INFO("argv[%d] = %s", i, argv[i]);
+    if(argc >= 4){ // workaround so that index can be given by command line
+        //std::string str(argv[3]);
+        HOTSTUFF_LOG_INFO("argv[3] = %s",argv[3]);
+        idx = stoi(std::string(argv[3]));
+        HOTSTUFF_LOG_INFO("index is %d",idx);
+    }
+
     auto client_port = opt_client_port->get();
     std::vector<std::tuple<std::string, std::string, std::string>> replicas;
     for (const auto &s: opt_replicas->get())
@@ -231,6 +244,7 @@ int main(int argc, char **argv) {
     }
 
     NetAddr plisten_addr{split_ip_port_cport(binding_addr).first};
+    SALTICIDAE_LOG_INFO("listen address is %s", std::string(plisten_addr).c_str());
 
     auto parent_limit = opt_parent_limit->get();
     hotstuff::pacemaker_bt pmaker;
