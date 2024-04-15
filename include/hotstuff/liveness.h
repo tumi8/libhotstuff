@@ -1,6 +1,7 @@
 /**
  * Copyright 2018 VMware
  * Copyright 2018 Ted Yin
+ * Copyright 2023 Chair of Network Architectures and Services, Technical University of Munich
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -70,7 +71,7 @@ class PMHighTail: public virtual PaceMaker {
             b = b->get_parents()[0]);
         return b == _a;
     }
-    
+
     void reg_hqc_update() {
         hsc->async_hqc_update().then([this](const block_t &hqc) {
             hqc_tail = hqc;
@@ -290,11 +291,12 @@ class PMRoundRobinProposer: virtual public PaceMaker {
     }
 
     void do_new_consensus(int x, const std::vector<uint256_t> &cmds) {
+		HOTSTUFF_LOG_PROTO("propose new block after exp_timeout or stop_rotate in do_new_consensus", x);
         auto blk = hsc->on_propose(cmds, get_parents(), bytearray_t());
         pm_qc_manual.reject();
         (pm_qc_manual = hsc->async_qc_finish(blk))
             .then([this, x]() {
-                HOTSTUFF_LOG_PROTO("Pacemaker: got QC for block %d", x);
+                HOTSTUFF_LOG_PROTO("Pacemaker: got QC for block %d, needs 3", x);
 #ifdef HOTSTUFF_TWO_STEP
                 if (x >= 2) return;
 #else
@@ -327,6 +329,8 @@ class PMRoundRobinProposer: virtual public PaceMaker {
         timer = TimerEvent(ec, salticidae::generic_bind(&PMRoundRobinProposer::on_exp_timeout, this, _1));
         timer.add(exp_timeout);
         exp_timeout *= 2;
+		// //next line added by me to fix bug after failing consensus round on purpose; needed for disabled_votes option when missing votes cause consensus to fail
+		 stop_rotate();
     }
 
     void stop_rotate() {
@@ -359,6 +363,11 @@ class PMRoundRobinProposer: virtual public PaceMaker {
     void on_consensus(const block_t &blk) override {
         timer.del();
         exp_timeout = base_timeout;
+		//next 2 lines added by me for shorter timeouts for failed view measurement benchmark (robustness benchmark)
+		//can be safely removed, but in that case timeouts will be much longer resulting in less samples per time for robustness benchmark
+		timer = TimerEvent(ec, salticidae::generic_bind(&PMRoundRobinProposer::on_exp_timeout, this, _1));
+        timer.add(exp_timeout);
+
         if (prop_blk[proposer] == blk)
             stop_rotate();
     }

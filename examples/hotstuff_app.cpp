@@ -1,6 +1,7 @@
 /**
  * Copyright 2018 VMware
  * Copyright 2018 Ted Yin
+ * Copyright 2023 Chair of Network Architectures and Services, Technical University of Munich
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -35,6 +36,7 @@
 #include "hotstuff/client.h"
 #include "hotstuff/hotstuff.h"
 #include "hotstuff/liveness.h"
+#include "hotstuff/retransmission.h"
 
 using salticidae::MsgNetwork;
 using salticidae::ClientNetwork;
@@ -63,7 +65,11 @@ using hotstuff::MsgRespCmd;
 using hotstuff::get_hash;
 using hotstuff::promise_t;
 
+#ifdef HOTSTUFF_ENABLE_RETRANSMISSION
+using HotStuff = hotstuff::HotStuffRetransmissionSecp256k1;
+#else
 using HotStuff = hotstuff::HotStuffSecp256k1;
+#endif
 
 class HotStuffApp: public HotStuff {
     double stat_period;
@@ -77,6 +83,8 @@ class HotStuffApp: public HotStuff {
     TimerEvent ev_stat_timer;
     /** Timer object to monitor the progress for simple impeachment */
     TimerEvent impeach_timer;
+    /** timer event to do first impeachment for setup phase */
+    TimerEvent setup_impeach_timer;
     /** The listen address for client RPC */
     NetAddr clisten_addr;
 
@@ -122,20 +130,24 @@ class HotStuffApp: public HotStuff {
                 double stat_period,
                 double impeach_timeout,
                 ReplicaID idx,
-                const bytearray_t &raw_privkey,
+                const bytearray_t& raw_privkey,
                 NetAddr plisten_addr,
                 NetAddr clisten_addr,
                 hotstuff::pacemaker_bt pmaker,
-                const EventContext &ec,
+#ifdef HOTSTUFF_ENABLE_RETRANSMISSION
+                hotstuff::RetransmissionConfig& retransmission_config,
+#endif
+                const EventContext& ec,
                 size_t nworker,
-                const Net::Config &repnet_config,
-                const ClientNetwork<opcode_t>::Config &clinet_config);
+                const Net::Config& repnet_config,
+                const ClientNetwork<opcode_t>::Config& clinet_config,
+                std::unordered_map<uint32_t, std::set<uint16_t>>& disabled_votes);
 
-    void start(const std::vector<std::tuple<NetAddr, bytearray_t, bytearray_t>> &reps);
+    void start(const std::vector<std::tuple<NetAddr, bytearray_t, bytearray_t>>& reps);
     void stop();
 };
 
-std::pair<std::string, std::string> split_ip_port_cport(const std::string &s) {
+std::pair<std::string, std::string> split_ip_port_cport(const std::string& s) {
     auto ret = trim_all(split(s, ";"));
     if (ret.size() != 2)
         throw std::invalid_argument("invalid cport format");
@@ -154,6 +166,7 @@ int main(int argc, char **argv) {
     auto opt_parent_limit = Config::OptValInt::create(-1);
     auto opt_stat_period = Config::OptValDouble::create(10);
     auto opt_replicas = Config::OptValStrVec::create();
+    auto opt_no_votes = Config::OptValStr::create(); // custom option for measurement of failed rounds
     auto opt_idx = Config::OptValInt::create(0);
     auto opt_client_port = Config::OptValInt::create(-1);
     auto opt_privkey = Config::OptValStr::create();
@@ -171,6 +184,7 @@ int main(int argc, char **argv) {
     auto opt_clinworker = Config::OptValInt::create(8);
     auto opt_cliburst = Config::OptValInt::create(1000);
     auto opt_notls = Config::OptValFlag::create(false);
+    auto opt_dtls = Config::OptValFlag::create(false); // custom option to activate DTLS instead of normal UDP
     auto opt_max_rep_msg = Config::OptValInt::create(4 << 20); // 4M by default
     auto opt_max_cli_msg = Config::OptValInt::create(65536); // 64K by default
 
@@ -178,6 +192,7 @@ int main(int argc, char **argv) {
     config.add_opt("parent-limit", opt_parent_limit, Config::SET_VAL);
     config.add_opt("stat-period", opt_stat_period, Config::SET_VAL);
     config.add_opt("replica", opt_replicas, Config::APPEND, 'a', "add an replica to the list");
+    config.add_opt("no-votes", opt_no_votes, Config::SET_VAL, 'v', "list of heights where replicas with specified indexes send no votes"); // list for no-votes option
     config.add_opt("idx", opt_idx, Config::SET_VAL, 'i', "specify the index in the replica list");
     config.add_opt("cport", opt_client_port, Config::SET_VAL, 'c', "specify the port listening for clients");
     config.add_opt("privkey", opt_privkey, Config::SET_VAL);
@@ -196,16 +211,49 @@ int main(int argc, char **argv) {
     config.add_opt("notls", opt_notls, Config::SWITCH_ON, 's', "disable TLS");
     config.add_opt("max-rep-msg", opt_max_rep_msg, Config::SET_VAL, 'S', "the maximum replica message size");
     config.add_opt("max-cli-msg", opt_max_cli_msg, Config::SET_VAL, 'S', "the maximum client message size");
+    config.add_opt("dtls", opt_dtls, Config::SWITCH_ON, 'd', "enable dtls (true/false)"); // config option corresponding to custom option
     config.add_opt("help", opt_help, Config::SWITCH_ON, 'h', "show this help info");
 
+    // retransmission options
+    auto opt_initial_rtt = Config::OptValDouble::create(0.005);
+    auto opt_rtt_estimator = Config::OptValStr::create("TCPEstimator");
+    auto opt_alpha = Config::OptValDouble::create(0.8);
+    auto opt_beta = Config::OptValDouble::create(1.5);
+    auto opt_upper_bound = Config::OptValDouble::create(10);
+    auto opt_lower_bound = Config::OptValDouble::create(0.001);
+    auto opt_saved_measurements = Config::OptValInt::create(20);
+
+    config.add_opt("initial-rtt", opt_rtt_estimator, Config::SET_VAL, -1, "The initila RTT, when ping fails or is too late for the first round.");
+    config.add_opt("rtt-estimator", opt_rtt_estimator, Config::SET_VAL, -1, "The RTT Estimator to use. Possible values are: TCPEstimator, VectorEstimator");
+    config.add_opt("alpha", opt_alpha, Config::SET_VAL, -1, "alpha for the TCPEstimator");
+    config.add_opt("beta", opt_beta, Config::SET_VAL, -1, "beta for the TCPEstimator");
+    config.add_opt("upper-bound", opt_upper_bound, Config::SET_VAL, -1, "upper-bound for the TCPEstimator");
+    config.add_opt("lower-bound", opt_lower_bound, Config::SET_VAL, -1, "lower-bound for the TCPEstimator");
+    config.add_opt("saved-measurements", opt_saved_measurements, Config::SET_VAL, -1, "number of saved measurements for the VectorEstimator");
+
     EventContext ec;
-    config.parse(argc, argv);
+    config.parse(argc, argv); // parses options in util.cpp argc is count of options, argv is option array pushes hotstuff-sec[].conf into hotstuff.conf Config as well
     if (opt_help->get())
     {
         config.print_help();
         exit(0);
     }
     auto idx = opt_idx->get();
+    /*
+        custom index assignment overwriting hotstuff-sec[].conf index;
+    */
+    HOTSTUFF_LOG_INFO("argc = %d",argc);
+    //print argv
+    for(int i = 1; i < argc; i++)
+        HOTSTUFF_LOG_INFO("argv[%d] = %s", i, argv[i]);
+    if(argc >= 4){ // workaround so that index can be given by command line
+        //std::string str(argv[3]);
+        HOTSTUFF_LOG_INFO("argv[3] = %s",argv[3]);
+        idx = stoi(std::string(argv[3]));
+        HOTSTUFF_LOG_INFO("index is %d",idx);
+    }
+
+
     auto client_port = opt_client_port->get();
     std::vector<std::tuple<std::string, std::string, std::string>> replicas;
     for (const auto &s: opt_replicas->get())
@@ -229,6 +277,43 @@ int main(int argc, char **argv) {
             throw HotStuffError("client port not specified");
         }
     }
+    /*
+        implementation of failed round option parsing; used in consensus.cpp
+    */
+    std::unordered_map<uint32_t, std::set<uint16_t>> disabled_votes;
+    {
+        const auto &s = opt_no_votes->get();
+        if(s.size() > 1){
+            auto res = trim_all(split(s, ","));
+            for(const auto &s2: res){
+                auto res2 = trim_all(split(s2, ";"));
+                std::set<uint16_t> myset; // indexes are here
+                for(int i = 1; i < res2.size(); i++){
+                    myset.insert(static_cast<uint16_t> (stoi(res2[i])) );
+                }
+                disabled_votes.insert(make_pair(static_cast<uint32_t> (stoi(res2[0])), myset));
+            }
+        }
+    }
+    // retransmission options parsing
+#ifdef HOTSTUFF_ENABLE_RETRANSMISSION
+    hotstuff::RetransmissionConfig retransmission_config;
+    if (opt_rtt_estimator->get() == "TCPEstimator")
+        retransmission_config.rtt_estimator = hotstuff::TCPEstimator;
+    else if (opt_rtt_estimator->get() == "VectorEstimator")
+        retransmission_config.rtt_estimator = hotstuff::VectorEstimator;
+    else {
+        std::cout << "Unkown RTTEstimator type: " << opt_rtt_estimator->get() << std::endl;
+        config.print_help();
+        exit(1);
+    }
+    retransmission_config.alpha = opt_alpha->get();
+    retransmission_config.beta = opt_beta->get();
+    retransmission_config.upper_bound = opt_upper_bound->get();
+    retransmission_config.lower_bound = opt_lower_bound->get();
+    retransmission_config.saved_measurements = opt_saved_measurements->get();
+    retransmission_config.initial_rtt = opt_initial_rtt->get();
+#endif
 
     NetAddr plisten_addr{split_ip_port_cport(binding_addr).first};
 
@@ -242,7 +327,10 @@ int main(int argc, char **argv) {
     HotStuffApp::Net::Config repnet_config;
     ClientNetwork<opcode_t>::Config clinet_config;
     repnet_config.max_msg_size(opt_max_rep_msg->get());
+    repnet_config.enable_dtls(opt_dtls->get()); // activation of dtls based on option value
     clinet_config.max_msg_size(opt_max_cli_msg->get());
+
+
     if (!opt_tls_privkey->get().empty() && !opt_notls->get())
     {
         auto tls_priv_key = new salticidae::PKey(
@@ -252,36 +340,42 @@ int main(int argc, char **argv) {
                 salticidae::X509::create_from_der(
                     hotstuff::from_hex(opt_tls_cert->get())));
         repnet_config
-            .enable_tls(true)
+            //.enable_tls(true) //disabled after UDP implementation -> DTLS
             .tls_key(tls_priv_key)
             .tls_cert(tls_cert);
     }
     repnet_config
         .burst_size(opt_repburst->get())
         .nworker(opt_repnworker->get());
+    repnet_config.index(idx); // overwrite index option with new custom index value from command line if changed
     clinet_config
         .burst_size(opt_cliburst->get())
         .nworker(opt_clinworker->get());
     papp = new HotStuffApp(opt_blk_size->get(),
-                        opt_stat_period->get(),
-                        opt_imp_timeout->get(),
-                        idx,
-                        hotstuff::from_hex(opt_privkey->get()),
-                        plisten_addr,
-                        NetAddr("0.0.0.0", client_port),
-                        std::move(pmaker),
-                        ec,
-                        opt_nworker->get(),
-                        repnet_config,
-                        clinet_config);
-    std::vector<std::tuple<NetAddr, bytearray_t, bytearray_t>> reps;
+                           opt_stat_period->get(),
+                           opt_imp_timeout->get(),
+                           idx,
+                           hotstuff::from_hex(opt_privkey->get()),
+                           plisten_addr, // this is the replicas own address
+                           NetAddr("0.0.0.0", client_port),
+                           std::move(pmaker),
+#ifdef HOTSTUFF_ENABLE_RETRANSMISSION
+                           retransmission_config,
+#endif
+                           ec,
+                           opt_nworker->get(),
+                           repnet_config,
+                           clinet_config,
+                           disabled_votes);
+    std::vector<std::tuple<NetAddr, bytearray_t, bytearray_t>> reps; // this is a list of all replicas including pubkey
+    //HOTSTUFF_LOG_INFO("** get replicas from file **");
     for (auto &r: replicas)
     {
         auto p = split_ip_port_cport(std::get<0>(r));
         reps.push_back(std::make_tuple(
             NetAddr(p.first),
-            hotstuff::from_hex(std::get<1>(r)),
-            hotstuff::from_hex(std::get<2>(r))));
+            hotstuff::from_hex(std::get<1>(r)), // this is the pubkey
+            hotstuff::from_hex(std::get<2>(r)))); // this is the cert_hash
     }
     auto shutdown = [&](int) { papp->stop(); };
     salticidae::SigEvent ev_sigint(ec, shutdown);
@@ -295,19 +389,26 @@ int main(int argc, char **argv) {
 }
 
 HotStuffApp::HotStuffApp(uint32_t blk_size,
-                        double stat_period,
-                        double impeach_timeout,
-                        ReplicaID idx,
-                        const bytearray_t &raw_privkey,
-                        NetAddr plisten_addr,
-                        NetAddr clisten_addr,
-                        hotstuff::pacemaker_bt pmaker,
-                        const EventContext &ec,
-                        size_t nworker,
-                        const Net::Config &repnet_config,
-                        const ClientNetwork<opcode_t>::Config &clinet_config):
-    HotStuff(blk_size, idx, raw_privkey,
-            plisten_addr, std::move(pmaker), ec, nworker, repnet_config),
+                         double stat_period,
+                         double impeach_timeout,
+                         ReplicaID idx,
+                         const bytearray_t& raw_privkey,
+                         NetAddr plisten_addr,
+                         NetAddr clisten_addr,
+                         hotstuff::pacemaker_bt pmaker,
+#ifdef HOTSTUFF_ENABLE_RETRANSMISSION
+                         hotstuff::RetransmissionConfig& retransmission_config,
+#endif
+                         const EventContext& ec,
+                         size_t nworker,
+                         const Net::Config& repnet_config,
+                         const ClientNetwork<opcode_t>::Config& clinet_config,
+                         std::unordered_map<uint32_t, std::set<uint16_t>>& disabled_votes):
+    HotStuff(blk_size, idx, raw_privkey, plisten_addr, std::move(pmaker),
+#ifdef HOTSTUFF_ENABLE_RETRANSMISSION
+        retransmission_config,
+#endif
+        ec, nworker, repnet_config, disabled_votes),
     stat_period(stat_period),
     impeach_timeout(impeach_timeout),
     ec(ec),
@@ -316,11 +417,12 @@ HotStuffApp::HotStuffApp(uint32_t blk_size,
     /* prepare the thread used for sending back confirmations */
     resp_tcall = new salticidae::ThreadCall(resp_ec);
     req_tcall = new salticidae::ThreadCall(req_ec);
-    resp_queue.reg_handler(resp_ec, [this](resp_queue_t &q) {
+    resp_queue.reg_handler(resp_ec, [this, idx](resp_queue_t &q) { // this q contains all final decisions, then a response is sent when new decision is added to q
         std::pair<Finality, NetAddr> p;
         while (q.try_dequeue(p))
         {
             try {
+                //HOTSTUFF_LOG_INFO("Replica with index %d is sending the command answer to the client", idx);
                 cn.send_msg(MsgRespCmd(std::move(p.first)), p.second);
             } catch (std::exception &err) {
                 HOTSTUFF_LOG_WARN("unable to send to the client: %s", err.what());
@@ -335,7 +437,7 @@ HotStuffApp::HotStuffApp(uint32_t blk_size,
     cn.listen(clisten_addr);
 }
 
-void HotStuffApp::client_request_cmd_handler(MsgReqCmd &&msg, const conn_t &conn) {
+void HotStuffApp::client_request_cmd_handler(MsgReqCmd &&msg, const conn_t &conn) { // called when it gets request command from client
     const NetAddr addr = conn->get_addr();
     auto cmd = parse_cmd(msg.serialized);
     const auto &cmd_hash = cmd->get_hash();
@@ -358,12 +460,14 @@ void HotStuffApp::start(const std::vector<std::tuple<NetAddr, bytearray_t, bytea
             get_pace_maker()->impeach();
         reset_imp_timer();
     });
+
     impeach_timer.add(impeach_timeout);
+
     HOTSTUFF_LOG_INFO("** starting the system with parameters **");
     HOTSTUFF_LOG_INFO("blk_size = %lu", blk_size);
     HOTSTUFF_LOG_INFO("conns = %lu", HotStuff::size());
     HOTSTUFF_LOG_INFO("** starting the event loop...");
-    HotStuff::start(reps);
+    HotStuff::start(reps); // this initiates the replicas
     cn.reg_conn_handler([this](const salticidae::ConnPool::conn_t &_conn, bool connected) {
         auto conn = salticidae::static_pointer_cast<conn_t::type>(_conn);
         if (connected)

@@ -1,6 +1,7 @@
 /**
  * Copyright 2018 VMware
  * Copyright 2018 Ted Yin
+ * Copyright 2023 Chair of Network Architectures and Services, Technical University of Munich
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -50,10 +51,14 @@ class HotStuffCore {
     std::unordered_map<block_t, promise_t> qc_waiting;
     promise_t propose_waiting;
     promise_t receive_proposal_waiting;
+    promise_t pre_process_proposal_waiting;
     promise_t hqc_update_waiting;
     /* == feature switches == */
     /** always vote negatively, useful for some PaceMakers */
     bool vote_disabled;
+	bool tmp_no_vote = false;
+	/* map with heights, where no vode will be sent: key is height, value is index*/
+	std::unordered_map<uint32_t, std::set<uint16_t>> disabled_votes;
 
     block_t get_delivered_blk(const uint256_t &blk_hash);
     void sanity_check_delivered(const block_t &blk);
@@ -63,6 +68,7 @@ class HotStuffCore {
     void on_qc_finish(const block_t &blk);
     void on_propose_(const Proposal &prop);
     void on_receive_proposal_(const Proposal &prop);
+    void on_pre_process_propose(const Proposal &prop);
 
     protected:
     ReplicaID id;                  /**< identity of the replica itself */
@@ -70,7 +76,7 @@ class HotStuffCore {
     public:
     BoxObj<EntityStorage> storage;
 
-    HotStuffCore(ReplicaID id, privkey_bt &&priv_key);
+    HotStuffCore(ReplicaID id, privkey_bt &&priv_key, std::unordered_map<uint32_t, std::set<uint16_t>> &disabled_votes);
     virtual ~HotStuffCore() {
         b0->qc_ref = nullptr;
     }
@@ -123,7 +129,7 @@ class HotStuffCore {
     /** Called upon sending out a new vote to the next proposer.  The user
      * should send the vote message to a *good* proposer to have good liveness,
      * while safety is always guaranteed by HotStuffCore. */
-    virtual void do_vote(ReplicaID last_proposer, const Vote &vote) = 0;
+    virtual void do_vote(ReplicaID last_proposer, const Vote &vote, bool dont_send = false) = 0;
 
     /* The user plugs in the detailed instances for those
      * polymorphic data types. */
@@ -156,6 +162,8 @@ class HotStuffCore {
     promise_t async_wait_receive_proposal();
     /** Get a promise resolved when hqc is updated. */
     promise_t async_hqc_update();
+    /** Get a promise resolved when a new proposal is received and before it is processed. */
+    promise_t async_pre_process_proposal();
 
     /* Other useful functions */
     const block_t &get_genesis() const { return b0; }
@@ -193,7 +201,11 @@ struct Proposal: public Serializable {
         s >> proposer;
         Block _blk;
         _blk.unserialize(s, hsc);
-        blk = hsc->storage->add_blk(std::move(_blk), hsc->get_config());
+        // maybe this solves the problem, where the replica tries to send
+        // a catch up message despite receiving the block via proposal
+        blk = hsc->storage->find_blk(_blk.get_hash());
+        if(!blk)
+            blk = hsc->storage->add_blk(std::move(_blk), hsc->get_config());
     }
 
     operator std::string () const {
@@ -234,13 +246,16 @@ struct Vote: public Serializable {
     Vote(Vote &&other) = default;
     
     void serialize(DataStream &s) const override {
-        s << voter << blk_hash << *cert;
+        s << voter << blk_hash;
+        if (cert)
+            s << *cert;
     }
 
     void unserialize(DataStream &s) override {
         assert(hsc != nullptr);
         s >> voter >> blk_hash;
-        cert = hsc->parse_part_cert(s);
+        if(s.size())
+            cert = hsc->parse_part_cert(s);
     }
 
     bool verify() const {

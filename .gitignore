@@ -17,8 +17,14 @@ include/hotstuff/config.h
 *.lo
 *.so
 *.gch
+*.cbp
 /Makefile
 /test/Makefile
 /test/test_secp256k1
 /test/test_concurrent_queue
 core
+*log*
+.idea
+.cmake
+.cache
+compile_commands.json

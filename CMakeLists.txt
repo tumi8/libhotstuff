@@ -1,5 +1,6 @@
 # Copyright 2018 VMware
 # Copyright 2018 Ted Yin
+# Copyright 2023 Chair of Network Architectures and Services, Technical University of Munich
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -54,6 +55,9 @@ add_library(hotstuff
     src/entity.cpp
     src/consensus.cpp
     src/hotstuff.cpp
+    src/retransmission.cpp
+    src/robust_fetchcontext.cpp
+    src/rtt_estimation.cpp
     )
 
 option(BUILD_SHARED "build shared library." OFF)
@@ -95,6 +99,10 @@ target_link_libraries(hotstuff-keygen hotstuff_static)
 
 add_executable(hotstuff-tls-keygen
     src/hotstuff_tls_keygen.cpp)
+
+# add_executable(rtt_estimation_test
+#     src/rtt_estimation.cpp)
+
 target_link_libraries(hotstuff-tls-keygen hotstuff_static)
 
 find_package(Doxygen)

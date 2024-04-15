@@ -1,9 +1,9 @@
 #ifndef _CPPROMISE_HPP
 #define _CPPROMISE_HPP
-
 /**
  * MIT License
  * Copyright (c) 2018 Ted Yin <tederminant@gmail.com>
+ * Copyright 2023 Chair of Network Architectures and Services, Technical University of Munich
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -29,6 +29,7 @@
 #include <memory>
 #include <functional>
 #include <type_traits>
+#include <stdexcept>
 
 #if __cplusplus >= 201703L
 #ifdef __has_include

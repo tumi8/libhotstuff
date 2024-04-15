@@ -1,6 +1,7 @@
 /**
  * Copyright 2018 VMware
  *
+ * Copyright 2023 Chair of Network Architectures and Services, Technical University of Munich
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -36,8 +37,8 @@ int main(int argc, char **argv) {
     while (n--)
     {
         priv_key = new salticidae::PKey(salticidae::PKey::create_privkey_rsa());
-        pub_key = new salticidae::X509(salticidae::X509::create_self_signed_from_pubkey(*priv_key));
-        printf("crt:%s sec:%s cid:%s\n",
+        pub_key = new salticidae::X509(salticidae::X509::create_self_signed_from_pubkey(*priv_key,"US"));
+        printf("crt:%s sec:%s cid:%s ",
                 salticidae::get_hex(pub_key->get_der()).c_str(),
                 salticidae::get_hex(priv_key->get_privkey_der()).c_str(),
                 salticidae::get_hex(salticidae::get_hash(pub_key->get_der())).c_str());
