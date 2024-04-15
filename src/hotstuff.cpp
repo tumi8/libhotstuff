@@ -1,6 +1,7 @@
 /**
  * Copyright 2018 VMware
  * Copyright 2018 Ted Yin
+ * Copyright 2023 Chair of Network Architectures and Services, Technical University of Munich
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -360,6 +361,7 @@ HotStuffBase::HotStuffBase(uint32_t blk_size,
     pn.reg_handler(salticidae::generic_bind(&HotStuffBase::resp_blk_handler, this, _1, _2));
     pn.reg_conn_handler(salticidae::generic_bind(&HotStuffBase::conn_handler, this, _1, _2));
     pn.start();
+	SALTICIDAE_LOG_INFO("peer network listening address is %s", std::string(listen_addr).c_str());
     pn.listen(listen_addr);
 }
 
@@ -401,14 +403,25 @@ void HotStuffBase::do_decide(Finality &&fin) {
 HotStuffBase::~HotStuffBase() {}
 
 void HotStuffBase::start(
+        bool use_tls,
         std::vector<std::tuple<NetAddr, pubkey_bt, uint256_t>> &&replicas,
         bool ec_loop) {
+	//all replicas do this once
     for (size_t i = 0; i < replicas.size(); i++)
     {
         auto &addr = std::get<0>(replicas[i]);
         auto cert_hash = std::move(std::get<2>(replicas[i]));
         valid_tls_certs.insert(cert_hash);
-        salticidae::PeerId peer{cert_hash};
+        salticidae::PeerId peer;
+
+        // Fixed PID cert bug here. Originally code would always use the
+        // cert_hash to construct the PID, independent if enable_tls is set
+        if (use_tls) {
+            peer = salticidae::PeerId(cert_hash);
+        } else {
+            peer = salticidae::PeerId(addr);
+        }
+
         HotStuffCore::add_replica(i, peer, std::move(std::get<1>(replicas[i])));
         if (addr != listen_addr)
         {

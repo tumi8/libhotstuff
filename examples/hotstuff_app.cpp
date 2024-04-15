@@ -1,6 +1,7 @@
 /**
  * Copyright 2018 VMware
  * Copyright 2018 Ted Yin
+ * Copyright 2023 Chair of Network Architectures and Services, Technical University of Munich
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -80,6 +81,8 @@ class HotStuffApp: public HotStuff {
     /** The listen address for client RPC */
     NetAddr clisten_addr;
 
+    bool _use_tls;
+
     std::unordered_map<const uint256_t, promise_t> unconfirmed;
 
     using conn_t = ClientNetwork<opcode_t>::conn_t;
@@ -129,7 +132,8 @@ class HotStuffApp: public HotStuff {
                 const EventContext &ec,
                 size_t nworker,
                 const Net::Config &repnet_config,
-                const ClientNetwork<opcode_t>::Config &clinet_config);
+                const ClientNetwork<opcode_t>::Config &clinet_config,
+                bool use_tls);
 
     void start(const std::vector<std::tuple<NetAddr, bytearray_t, bytearray_t>> &reps);
     void stop();
@@ -206,6 +210,18 @@ int main(int argc, char **argv) {
         exit(0);
     }
     auto idx = opt_idx->get();
+
+    HOTSTUFF_LOG_INFO("argc = %d",argc);
+    //print argv
+    for(int i = 1; i < argc; i++)
+        HOTSTUFF_LOG_INFO("argv[%d] = %s", i, argv[i]);
+    if(argc >= 4){ // workaround so that index can be given by command line
+        //std::string str(argv[3]);
+        HOTSTUFF_LOG_INFO("argv[3] = %s",argv[3]);
+        idx = stoi(std::string(argv[3]));
+        HOTSTUFF_LOG_INFO("index is %d",idx);
+    }
+
     auto client_port = opt_client_port->get();
     std::vector<std::tuple<std::string, std::string, std::string>> replicas;
     for (const auto &s: opt_replicas->get())
@@ -231,6 +247,7 @@ int main(int argc, char **argv) {
     }
 
     NetAddr plisten_addr{split_ip_port_cport(binding_addr).first};
+    SALTICIDAE_LOG_INFO("listen address is %s", std::string(plisten_addr).c_str());
 
     auto parent_limit = opt_parent_limit->get();
     hotstuff::pacemaker_bt pmaker;
@@ -243,6 +260,7 @@ int main(int argc, char **argv) {
     ClientNetwork<opcode_t>::Config clinet_config;
     repnet_config.max_msg_size(opt_max_rep_msg->get());
     clinet_config.max_msg_size(opt_max_cli_msg->get());
+    bool use_tls = true;
     if (!opt_tls_privkey->get().empty() && !opt_notls->get())
     {
         auto tls_priv_key = new salticidae::PKey(
@@ -273,7 +291,8 @@ int main(int argc, char **argv) {
                         ec,
                         opt_nworker->get(),
                         repnet_config,
-                        clinet_config);
+                        clinet_config,
+                        use_tls);
     std::vector<std::tuple<NetAddr, bytearray_t, bytearray_t>> reps;
     for (auto &r: replicas)
     {
@@ -305,14 +324,16 @@ HotStuffApp::HotStuffApp(uint32_t blk_size,
                         const EventContext &ec,
                         size_t nworker,
                         const Net::Config &repnet_config,
-                        const ClientNetwork<opcode_t>::Config &clinet_config):
+                        const ClientNetwork<opcode_t>::Config &clinet_config,
+                        bool use_tls):
     HotStuff(blk_size, idx, raw_privkey,
             plisten_addr, std::move(pmaker), ec, nworker, repnet_config),
     stat_period(stat_period),
     impeach_timeout(impeach_timeout),
     ec(ec),
     cn(req_ec, clinet_config),
-    clisten_addr(clisten_addr) {
+    clisten_addr(clisten_addr),
+    _use_tls(use_tls) {
     /* prepare the thread used for sending back confirmations */
     resp_tcall = new salticidae::ThreadCall(resp_ec);
     req_tcall = new salticidae::ThreadCall(req_ec);
@@ -332,7 +353,7 @@ HotStuffApp::HotStuffApp(uint32_t blk_size,
     /* register the handlers for msg from clients */
     cn.reg_handler(salticidae::generic_bind(&HotStuffApp::client_request_cmd_handler, this, _1, _2));
     cn.start();
-    cn.listen(clisten_addr);
+    cn.listen_tcp(clisten_addr);
 }
 
 void HotStuffApp::client_request_cmd_handler(MsgReqCmd &&msg, const conn_t &conn) {
@@ -363,7 +384,7 @@ void HotStuffApp::start(const std::vector<std::tuple<NetAddr, bytearray_t, bytea
     HOTSTUFF_LOG_INFO("blk_size = %lu", blk_size);
     HOTSTUFF_LOG_INFO("conns = %lu", HotStuff::size());
     HOTSTUFF_LOG_INFO("** starting the event loop...");
-    HotStuff::start(reps);
+    HotStuff::start(this->_use_tls, reps);
     cn.reg_conn_handler([this](const salticidae::ConnPool::conn_t &_conn, bool connected) {
         auto conn = salticidae::static_pointer_cast<conn_t::type>(_conn);
         if (connected)

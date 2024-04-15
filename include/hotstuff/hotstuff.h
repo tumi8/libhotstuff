@@ -1,6 +1,7 @@
 /**
  * Copyright 2018 VMware
  * Copyright 2018 Ted Yin
+ * Copyright 2023 Chair of Network Architectures and Services, Technical University of Munich
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -220,7 +221,7 @@ class HotStuffBase: public HotStuffCore {
 
     /* Submit the command to be decided. */
     void exec_command(uint256_t cmd_hash, commit_cb_t callback);
-    void start(std::vector<std::tuple<NetAddr, pubkey_bt, uint256_t>> &&replicas,
+    void start(bool use_tls, std::vector<std::tuple<NetAddr, pubkey_bt, uint256_t>> &&replicas,
                 bool ec_loop = false);
 
     size_t size() const { return peers.size(); }
@@ -293,7 +294,7 @@ class HotStuff: public HotStuffBase {
                     nworker,
                     netconfig) {}
 
-    void start(const std::vector<std::tuple<NetAddr, bytearray_t, bytearray_t>> &replicas, bool ec_loop = false) {
+    void start(bool use_tls, const std::vector<std::tuple<NetAddr, bytearray_t, bytearray_t>> &replicas, bool ec_loop = false) {
         std::vector<std::tuple<NetAddr, pubkey_bt, uint256_t>> reps;
         for (auto &r: replicas)
             reps.push_back(
@@ -302,7 +303,7 @@ class HotStuff: public HotStuffBase {
                     new PubKeyType(std::get<1>(r)),
                     uint256_t(std::get<2>(r))
                 ));
-        HotStuffBase::start(std::move(reps), ec_loop);
+        HotStuffBase::start(use_tls, std::move(reps), ec_loop);
     }
 };
 

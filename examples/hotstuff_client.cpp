@@ -1,6 +1,7 @@
 /**
  * Copyright 2018 VMware
  * Copyright 2018 Ted Yin
+ * Copyright 2023 Chair of Network Architectures and Services, Technical University of Munich
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -67,7 +68,7 @@ Net mn(ec, Net::Config());
 
 void connect_all() {
     for (size_t i = 0; i < replicas.size(); i++)
-        conns.insert(std::make_pair(i, mn.connect_sync(replicas[i])));
+        conns.insert(std::make_pair(i, mn.connect_sync_tcp(replicas[i])));
 }
 
 bool try_send(bool check = true) {
