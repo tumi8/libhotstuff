@@ -1,6 +1,7 @@
 /**
  * Copyright 2018 VMware
  * Copyright 2018 Ted Yin
+ * Copyright 2023 Chair of Network Architectures and Services, Technical University of Munich
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -125,7 +126,13 @@ int main(int argc, char **argv) {
     auto opt_max_async_num = Config::OptValInt::create(10);
     auto opt_cid = Config::OptValInt::create(-1);
 
-    auto shutdown = [&](int) { ec.stop(); };
+    auto shutdown = [&](int) {
+        ec.stop();
+        //use loop after calling stop, so it closes correctly doesn't do anything useful, bute makes correct closing after SigInt more likely
+        auto cmd = new CommandDummy(cid, cnt++);
+        MsgReqCmd msg(*cmd);
+        for (auto &p: conns) mn.send_msg(msg, p.second);
+    };
     salticidae::SigEvent ev_sigint(ec, shutdown);
     salticidae::SigEvent ev_sigterm(ec, shutdown);
     ev_sigint.add(SIGINT);
@@ -169,6 +176,7 @@ int main(int argc, char **argv) {
     ec.dispatch();
 
 #ifdef HOTSTUFF_ENABLE_BENCHMARK
+    HOTSTUFF_LOG_INFO("now benchmark is sent to stderr");
     for (const auto &e: elapsed)
     {
         char fmt[64];

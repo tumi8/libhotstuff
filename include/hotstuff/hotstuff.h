@@ -1,6 +1,7 @@
 /**
  * Copyright 2018 VMware
  * Copyright 2018 Ted Yin
+ * Copyright 2023 Chair of Network Architectures and Services, Technical University of Munich
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -194,7 +195,7 @@ class HotStuffBase: public HotStuffCore {
     inline bool conn_handler(const salticidae::ConnPool::conn_t &, bool);
 
     void do_broadcast_proposal(const Proposal &) override;
-    void do_vote(ReplicaID, const Vote &) override;
+    void do_vote(ReplicaID, const Vote &, bool dont_send = false) override;
     void do_decide(Finality &&) override;
     void do_consensus(const block_t &blk) override;
 
@@ -212,7 +213,8 @@ class HotStuffBase: public HotStuffCore {
             pacemaker_bt pmaker,
             EventContext ec,
             size_t nworker,
-            const Net::Config &netconfig);
+            const Net::Config &netconfig,
+            std::unordered_map<uint32_t, std::set<uint16_t>> &disabled_votes);
 
     ~HotStuffBase();
 
@@ -277,13 +279,14 @@ class HotStuff: public HotStuffBase {
 
     public:
     HotStuff(uint32_t blk_size,
-            ReplicaID rid,
+            ReplicaID rid, // this is actually the idx
             const bytearray_t &raw_privkey,
             NetAddr listen_addr,
             pacemaker_bt pmaker,
             EventContext ec = EventContext(),
             size_t nworker = 4,
-            const Net::Config &netconfig = Net::Config()):
+            const Net::Config &netconfig = Net::Config(),
+            std::unordered_map<uint32_t, std::set<uint16_t>> disabled_votes = std::unordered_map<uint32_t, std::set<uint16_t>>()):
         HotStuffBase(blk_size,
                     rid,
                     new PrivKeyType(raw_privkey),
@@ -291,7 +294,8 @@ class HotStuff: public HotStuffBase {
                     std::move(pmaker),
                     ec,
                     nworker,
-                    netconfig) {}
+                    netconfig,
+                    disabled_votes) {}
 
     void start(const std::vector<std::tuple<NetAddr, bytearray_t, bytearray_t>> &replicas, bool ec_loop = false) {
         std::vector<std::tuple<NetAddr, pubkey_bt, uint256_t>> reps;
@@ -327,7 +331,9 @@ template<>
 inline void FetchContext<ENT_TYPE_CMD>::timeout_cb(TimerEvent &) {
     HOTSTUFF_LOG_WARN("cmd fetching %.10s timeout", get_hex(ent_hash).c_str());
     for (const auto &replica: replicas)
+    {
         send(replica);
+    }
     reset_timeout();
 }
 
@@ -335,7 +341,10 @@ template<>
 inline void FetchContext<ENT_TYPE_BLK>::timeout_cb(TimerEvent &) {
     HOTSTUFF_LOG_WARN("block fetching %.10s timeout", get_hex(ent_hash).c_str());
     for (const auto &replica: replicas)
+    {
+        //HOTSTUFF_LOG_INFO("fetch context timeout: requested block from replica %d",replica);
         send(replica);
+    }
     reset_timeout();
 }
 
@@ -364,6 +373,7 @@ void FetchContext<ent_type>::reset_timeout() {
 
 template<EntityType ent_type>
 void FetchContext<ent_type>::add_replica(const PeerId &replica, bool fetch_now) {
+    //HOTSTUFF_LOG_INFO("replica %d added to Fetchcontext",replica);
     if (replicas.empty() && fetch_now)
         send(replica);
     replicas.insert(replica);

@@ -1,6 +1,7 @@
 /**
  * Copyright 2018 VMware
  * Copyright 2018 Ted Yin
+ * Copyright 2023 Chair of Network Architectures and Services, Technical University of Munich
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -90,7 +91,7 @@ void HotStuffBase::on_fetch_blk(const block_t &blk) {
     //for (auto cmd: blk->get_cmds()) on_fetch_cmd(cmd);
     const uint256_t &blk_hash = blk->get_hash();
     auto it = blk_fetch_waiting.find(blk_hash);
-    if (it != blk_fetch_waiting.end())
+    if (it != blk_fetch_waiting.end()) // if replica was waiting for block do rest otherwise do nothing
     {
         it->second.resolve(blk);
         blk_fetch_waiting.erase(it);
@@ -149,8 +150,8 @@ promise_t HotStuffBase::async_fetch_blk(const uint256_t &blk_hash,
         return promise_t([this, &blk_hash](promise_t pm){
             pm.resolve(storage->find_blk(blk_hash));
         });
-    auto it = blk_fetch_waiting.find(blk_hash);
-    if (it == blk_fetch_waiting.end())
+    auto it = blk_fetch_waiting.find(blk_hash); //when block is requested the second time
+    if (it == blk_fetch_waiting.end()) //when block is requested the first time, put into ->  waiting blocks map
     {
 #ifdef HOTSTUFF_BLK_PROFILE
         blk_profiler.rec_tx(blk_hash, false);
@@ -160,7 +161,7 @@ promise_t HotStuffBase::async_fetch_blk(const uint256_t &blk_hash,
                 blk_hash,
                 BlockFetchContext(blk_hash, this))).first;
     }
-    if (replica != nullptr)
+    if (replica != nullptr) // it was called the first time by request block handler
         it->second.add_replica(*replica, fetch_now);
     return static_cast<promise_t &>(it->second);
 }
@@ -236,7 +237,7 @@ void HotStuffBase::req_blk_handler(MsgReqBlock &&msg, const Net::conn_t &conn) {
     auto &blk_hashes = msg.blk_hashes;
     std::vector<promise_t> pms;
     for (const auto &h: blk_hashes)
-        pms.push_back(async_fetch_blk(h, nullptr));
+        pms.push_back(async_fetch_blk(h, nullptr)); // if he doesnt have the blocks yet, request them first time without specifying from where
     promise::all(pms).then([replica, this](const promise::values_t values) {
         std::vector<block_t> blks;
         for (auto &v: values)
@@ -249,7 +250,7 @@ void HotStuffBase::req_blk_handler(MsgReqBlock &&msg, const Net::conn_t &conn) {
 }
 
 void HotStuffBase::resp_blk_handler(MsgRespBlock &&msg, const Net::conn_t &) {
-    msg.postponed_parse(this);
+    msg.postponed_parse(this); //this already imports blocks into storage
     for (const auto &blk: msg.blks)
         if (blk) on_fetch_blk(blk);
 }
@@ -259,7 +260,7 @@ bool HotStuffBase::conn_handler(const salticidae::ConnPool::conn_t &conn, bool c
     {
         auto cert = conn->get_peer_cert();
         //SALTICIDAE_LOG_INFO("%s", salticidae::get_hash(cert->get_der()).to_hex().c_str());
-        return (!cert) || valid_tls_certs.count(salticidae::get_hash(cert->get_der()));
+        return (!cert) || valid_tls_certs.count(salticidae::get_hash(cert->get_der())); // not tls connection used then !cert --> this returns false when cert exists but no valid tls
     }
     return true;
 }
@@ -326,14 +327,15 @@ void HotStuffBase::print_stat() const {
 }
 
 HotStuffBase::HotStuffBase(uint32_t blk_size,
-                    ReplicaID rid,
+                    ReplicaID rid, // this is the index
                     privkey_bt &&priv_key,
                     NetAddr listen_addr,
                     pacemaker_bt pmaker,
                     EventContext ec,
                     size_t nworker,
-                    const Net::Config &netconfig):
-        HotStuffCore(rid, std::move(priv_key)),
+                    const Net::Config &netconfig,
+                    std::unordered_map<uint32_t, std::set<uint16_t>> &disabled_votes):
+        HotStuffCore(rid, std::move(priv_key), disabled_votes),
         listen_addr(listen_addr),
         blk_size(blk_size),
         ec(ec),
@@ -360,7 +362,8 @@ HotStuffBase::HotStuffBase(uint32_t blk_size,
     pn.reg_handler(salticidae::generic_bind(&HotStuffBase::resp_blk_handler, this, _1, _2));
     pn.reg_conn_handler(salticidae::generic_bind(&HotStuffBase::conn_handler, this, _1, _2));
     pn.start();
-    pn.listen(listen_addr);
+    //next line was disabled when switching to UDP implementation
+    //pn.listen(listen_addr); // here own socket gets created, others in HotStuffBase::start
 }
 
 void HotStuffBase::do_broadcast_proposal(const Proposal &prop) {
@@ -370,16 +373,21 @@ void HotStuffBase::do_broadcast_proposal(const Proposal &prop) {
     //    pn.send_msg(prop_msg, replica);
 }
 
-void HotStuffBase::do_vote(ReplicaID last_proposer, const Vote &vote) {
+// dont_send logic was added, but finally not used; set to false by default
+void HotStuffBase::do_vote(ReplicaID last_proposer, const Vote &vote, bool dont_send) {
     pmaker->beat_resp(last_proposer)
-            .then([this, vote](ReplicaID proposer) {
+            .then([this, vote, dont_send](ReplicaID proposer) {
         if (proposer == get_id())
         {
             throw HotStuffError("unreachable line");
             //on_receive_vote(vote);
         }
         else
-            pn.send_msg(MsgVote(vote), get_config().get_peer_id(proposer));
+        {
+            if(!dont_send){
+                pn.send_msg(MsgVote(vote), get_config().get_peer_id(proposer));
+            }
+        }
     });
 }
 
@@ -399,25 +407,46 @@ void HotStuffBase::do_decide(Finality &&fin) {
 }
 
 HotStuffBase::~HotStuffBase() {}
-
+// here end up all replica Netaddresses from config, the own address is "plisten_addr" in HotStuffApp --> == NetAddr listen_addr in Hotstuffbase (comes from hotstuff-sec[].conf)
 void HotStuffBase::start(
         std::vector<std::tuple<NetAddr, pubkey_bt, uint256_t>> &&replicas,
         bool ec_loop) {
+    //all replicas in arguments do this once
     for (size_t i = 0; i < replicas.size(); i++)
     {
         auto &addr = std::get<0>(replicas[i]);
         auto cert_hash = std::move(std::get<2>(replicas[i]));
         valid_tls_certs.insert(cert_hash);
-        salticidae::PeerId peer{cert_hash};
-        HotStuffCore::add_replica(i, peer, std::move(std::get<1>(replicas[i])));
-        if (addr != listen_addr)
+
+        //change peerID to address when not using tls or dtls; this change depends on enable_(d)tls
+        //originally tls was automatically used, causing a bug with address based peerID when tls was disabled
+        salticidae::PeerId peer;
+        if(pn.is_enable_tls())
         {
+            peer = salticidae::PeerId{cert_hash};
+        }
+        else if(pn.is_enable_dtls())
+        {
+            peer = salticidae::PeerId{cert_hash};
+        }
+        else
+        {
+            peer = salticidae::PeerId(addr);
+        }
+
+        HotStuffCore::add_replica(i, peer, std::move(std::get<1>(replicas[i])));
+        //SALTICIDAE_LOG_INFO("listen_addr is: %d : %d", listen_addr.ip, listen_addr.port);
+        if (addr != listen_addr) // do for all other replicas, not for itself
+        {
+            LOG_INFO("Init next peer");
             peers.push_back(peer);
             pn.add_peer(peer);
             pn.set_peer_addr(peer, addr);
-            pn.conn_peer(peer);
+            // in the following function starts the udp implementation
+            pn.conn_peer(peer,listen_addr);
         }
     }
+    LOG_INFO("finished peer loop");
 
     /* ((n - 1) + 1 - 1) / 3 */
     uint32_t nfaulty = peers.size() / 3;
@@ -439,8 +468,8 @@ void HotStuffBase::start(
             if (it == decision_waiting.end())
                 it = decision_waiting.insert(std::make_pair(cmd_hash, e.second)).first;
             else
-                e.second(Finality(id, 0, 0, 0, cmd_hash, uint256_t()));
-            if (proposer != get_id()) continue;
+                e.second(Finality(id, 0, 0, 0, cmd_hash, uint256_t())); // when command already in decision waiting and again received answer with decision=0 (no decision)
+            if (proposer != get_id()) continue; // if replica is the proposer, then start propose for next command block
             cmd_pending_buffer.push(cmd_hash);
             if (cmd_pending_buffer.size() >= blk_size)
             {

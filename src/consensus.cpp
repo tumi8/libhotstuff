@@ -1,6 +1,7 @@
 /**
  * Copyright 2018 VMware
  * Copyright 2018 Ted Yin
+ * Copyright 2023 Chair of Network Architectures and Services, Technical University of Munich
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -30,8 +31,9 @@ namespace hotstuff {
 
 /* The core logic of HotStuff, is fairly simple :). */
 /*** begin HotStuff protocol logic ***/
-HotStuffCore::HotStuffCore(ReplicaID id,
-                            privkey_bt &&priv_key):
+HotStuffCore::HotStuffCore(ReplicaID id, // this is the index
+                            privkey_bt &&priv_key,
+                            std::unordered_map<uint32_t, std::set<uint16_t>> &disabled_votes):
         b0(new Block(true, 1)),
         b_lock(b0),
         b_exec(b0),
@@ -40,6 +42,7 @@ HotStuffCore::HotStuffCore(ReplicaID id,
         tails{b0},
         vote_disabled(false),
         id(id),
+        disabled_votes(disabled_votes),
         storage(new EntityStorage()) {
     storage->add_blk(b0);
 }
@@ -179,7 +182,8 @@ block_t HotStuffCore::on_propose(const std::vector<uint256_t> &cmds,
         Vote(id, bnew_hash,
             create_part_cert(*priv_key, bnew_hash), this));
     on_propose_(prop);
-    /* boradcast to other replicas */
+    /* broadcast to other replicas */
+    //LOG_PROTO("propose broadcasting proposal");
     do_broadcast_proposal(prop);
     return bnew;
 }
@@ -214,10 +218,27 @@ void HotStuffCore::on_receive_proposal(const Proposal &prop) {
     if (bnew->qc_ref)
         on_qc_finish(bnew->qc_ref);
     on_receive_proposal_(prop);
-    if (opinion && !vote_disabled)
+    // here starts the disabled_votes logic
+    auto it = disabled_votes.find(bnew->height);
+    bool is_in = false;
+    if(it != disabled_votes.end() && !tmp_no_vote)
+    {
+        is_in = (it->second).find(id) != (it->second).end();
+
+    }
+    if(is_in)
+    {
+        LOG_PROTO("replica will not vote for height %d",bnew->height);
+        tmp_no_vote = true;
+    }
+    // here ends the disabled_votes logic
+    if (opinion && !vote_disabled && !is_in) // is_in was added, dont vote for certain heights for testing of failed consensus, for that store chosen heights as key in map with mapped value as index of replica, that shouldnt send a vote
+    {
+        tmp_no_vote = false;
         do_vote(prop.proposer,
             Vote(id, bnew->get_hash(),
                 create_part_cert(*priv_key, bnew->get_hash()), this));
+    }
 }
 
 void HotStuffCore::on_receive_vote(const Vote &vote) {

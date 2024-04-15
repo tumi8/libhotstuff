@@ -1,6 +1,7 @@
 /**
  * Copyright 2018 VMware
  * Copyright 2018 Ted Yin
+ * Copyright 2023 Chair of Network Architectures and Services, Technical University of Munich
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -54,6 +55,9 @@ class HotStuffCore {
     /* == feature switches == */
     /** always vote negatively, useful for some PaceMakers */
     bool vote_disabled;
+    bool tmp_no_vote = false;
+    /* map with heights, where no vode will be sent: key is height, value is index*/
+    std::unordered_map<uint32_t, std::set<uint16_t>> disabled_votes;
 
     block_t get_delivered_blk(const uint256_t &blk_hash);
     void sanity_check_delivered(const block_t &blk);
@@ -70,7 +74,7 @@ class HotStuffCore {
     public:
     BoxObj<EntityStorage> storage;
 
-    HotStuffCore(ReplicaID id, privkey_bt &&priv_key);
+    HotStuffCore(ReplicaID id, privkey_bt &&priv_key, std::unordered_map<uint32_t, std::set<uint16_t>> &disabled_votes);
     virtual ~HotStuffCore() {
         b0->qc_ref = nullptr;
     }
@@ -123,7 +127,7 @@ class HotStuffCore {
     /** Called upon sending out a new vote to the next proposer.  The user
      * should send the vote message to a *good* proposer to have good liveness,
      * while safety is always guaranteed by HotStuffCore. */
-    virtual void do_vote(ReplicaID last_proposer, const Vote &vote) = 0;
+    virtual void do_vote(ReplicaID last_proposer, const Vote &vote, bool dont_send = false) = 0;
 
     /* The user plugs in the detailed instances for those
      * polymorphic data types. */
